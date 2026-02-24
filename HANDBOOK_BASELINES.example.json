@@ -1,0 +1,9 @@
+{
+  "create_my_leave_request": 6,
+  "approve_leave_request": 4,
+  "reject_leave_request": 6,
+  "create_employee": 20,
+  "create_employee_change_request": 10,
+  "list_leave_requests": 4,
+  "get_employee_details": 4
+}

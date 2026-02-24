@@ -147,7 +147,7 @@ app.http("analyticsWebhook", {
 // TRIGGER 2: Timer — daily metrics aggregation
 // ══════════════════════════════════════════════════════════════════════════════
 
-const BASELINE_MINUTES: Record<string, number> = {
+const DEFAULT_BASELINE_MINUTES: Record<string, number> = {
   get_my_employee_details: 3, create_my_leave_request: 5, list_my_absences: 3,
   list_my_bonuses: 4, list_departments: 2, list_divisions: 2, list_locations: 2,
   list_working_patterns: 2, list_employees: 3, get_employee_details: 3,
@@ -160,6 +160,29 @@ const BASELINE_MINUTES: Record<string, number> = {
   update_sickness: 5, approve_leave_request_admin: 3, reject_leave_request_admin: 5,
   create_leave_request_admin: 5, get_leave_request_admin: 3, list_leave_requests_admin: 3,
 };
+
+function getHandbookBaselines(): Record<string, number> {
+  try {
+    const raw = process.env.HANDBOOK_BASELINE_MINUTES_JSON;
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const clean: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) clean[k] = n;
+    }
+    return clean;
+  } catch {
+    return {};
+  }
+}
+
+const HANDBOOK_BASELINES = getHandbookBaselines();
+
+function baselineMinutesForTool(toolName: string): number {
+  return HANDBOOK_BASELINES[toolName] || DEFAULT_BASELINE_MINUTES[toolName] || 3;
+}
 
 async function dailyAggregation(_timer: unknown, context: InvocationContext): Promise<void> {
   context.log("[Aggregation] Starting daily metrics");
@@ -174,7 +197,7 @@ async function dailyAggregation(_timer: unknown, context: InvocationContext): Pr
   const invertedEnd = String(9999999999999 - dayStart).padStart(13, "0");
   const invertedStart = String(9999999999999 - dayEnd).padStart(13, "0");
 
-  const hourlyRate = parseFloat(process.env.DEFAULT_HOURLY_RATE || "25");
+  const hourlyRate = parseFloat(process.env.DEFAULT_HOURLY_RATE || "45");
 
   const tenantData: Record<string, { turns: any[]; toolExecs: any[]; users: Set<string> }> = {};
 
@@ -216,8 +239,14 @@ async function dailyAggregation(_timer: unknown, context: InvocationContext): Pr
       }
 
       let totalBaselineMinutes = 0;
-      for (const [toolName, count] of Object.entries(toolCounts)) {
-        totalBaselineMinutes += count * (BASELINE_MINUTES[toolName] || 3);
+      for (const exec of toolExecs) {
+        const toolName = exec.tool_name || "unknown";
+        // Supports explicit per-event estimate from handbook instrumentation, else falls back.
+        const manualMinutes = Number(exec.estimated_manual_minutes);
+        const baseline = Number.isFinite(manualMinutes) && manualMinutes > 0
+          ? manualMinutes
+          : baselineMinutesForTool(toolName);
+        totalBaselineMinutes += baseline;
       }
 
       const hoursSaved = totalBaselineMinutes / 60;
@@ -415,9 +444,9 @@ async function dashboardHandler(request: HttpRequest, context: InvocationContext
           allToolCounts[tool] = (allToolCounts[tool] || 0) + (count as number);
         }
       }
-      const hourlyRate = parseFloat(process.env.DEFAULT_HOURLY_RATE || "25");
+      const hourlyRate = parseFloat(process.env.DEFAULT_HOURLY_RATE || "45");
       const tools = Object.entries(allToolCounts).map(([name, count]) => {
-        const mins = BASELINE_MINUTES[name] || 3;
+        const mins = baselineMinutesForTool(name);
         const hrs = (count * mins) / 60;
         return {
           tool: name,
