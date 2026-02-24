@@ -364,6 +364,16 @@ async function dashboardHandler(request: HttpRequest, context: InvocationContext
         context.log("[Dashboard] Unique user scan failed, unique_users may be approximate");
       }
 
+      // Recompute month savings from tool counts + current handbook baselines + current hourly rate.
+      // This avoids stale historical aggregates when assumptions (rate/baselines) are updated.
+      const hourlyRate = parseFloat(process.env.DEFAULT_HOURLY_RATE || "45");
+      let recomputedTotalBaselineMinutes = 0;
+      for (const [toolName, count] of Object.entries(allToolCounts)) {
+        recomputedTotalBaselineMinutes += (count as number) * baselineMinutesForTool(toolName);
+      }
+      const recomputedHoursSaved = recomputedTotalBaselineMinutes / 60;
+      const recomputedCostSaved = recomputedHoursSaved * hourlyRate;
+
       return {
         status: 200,
         jsonBody: {
@@ -374,8 +384,8 @@ async function dashboardHandler(request: HttpRequest, context: InvocationContext
           // When true, at least one turn_completed event exists — zeros are real zeros.
           has_turn_data: hasTurnData,
           hero_metrics: {
-            cost_saved: Math.round(totalCostSaved * 100) / 100,
-            hours_saved: Math.round(totalHoursSaved * 100) / 100,
+            cost_saved: Math.round(recomputedCostSaved * 100) / 100,
+            hours_saved: Math.round(recomputedHoursSaved * 100) / 100,
             self_service_rate: turnTotal > 0 ? Math.round((successTotal / turnTotal) * 10000) / 100 : 0,
             total_conversations: totalTurns,
             total_tool_executions: totalToolExecs,
@@ -385,8 +395,8 @@ async function dashboardHandler(request: HttpRequest, context: InvocationContext
             error_rate: turnTotal > 0 ? Math.round(((turnTotal - successTotal) / turnTotal) * 10000) / 100 : 0,
             employee_turns: employeeTurns,
             admin_turns: adminTurns,
-            projected_annual_savings: Math.round(totalCostSaved * 12 * 100) / 100,
-            projected_annual_hours: Math.round(totalHoursSaved * 12 * 100) / 100,
+            projected_annual_savings: Math.round(recomputedCostSaved * 12 * 100) / 100,
+            projected_annual_hours: Math.round(recomputedHoursSaved * 12 * 100) / 100,
           },
           top_tools: Object.entries(allToolCounts)
             .sort(([, a], [, b]) => (b as number) - (a as number))
