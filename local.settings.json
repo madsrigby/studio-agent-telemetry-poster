@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "AzureWebJobsStorage": "DefaultEndpointsProtocol=https;AccountName=rgstudioagenttelemetry01;AccountKey=zinjJXcp2YO/GDl+873X6GWNN02uiH+AIcXHC1JX/DROXN1PAkZHX8qGyDUZQ44M61F8K08js2w/+AStjARQTw==;EndpointSuffix=core.windows.net",
+    "TELEMETRY_QUEUE_CONNECTION_STRING": "DefaultEndpointsProtocol=https;AccountName=rgstudioagenttelemetry01;AccountKey=zinjJXcp2YO/GDl+873X6GWNN02uiH+AIcXHC1JX/DROXN1PAkZHX8qGyDUZQ44M61F8K08js2w/+AStjARQTw==;EndpointSuffix=core.windows.net",
+    "rgstudioagenttelemetry01_STORAGE": "DefaultEndpointsProtocol=https;AccountName=rgstudioagenttelemetry01;AccountKey=zinjJXcp2YO/GDl+873X6GWNN02uiH+AIcXHC1JX/DROXN1PAkZHX8qGyDUZQ44M61F8K08js2w/+AStjARQTw==;EndpointSuffix=core.windows.net",
+    "RELEVANCE_TELEMETRY_WEBHOOK_URL": "https://api-bcbe5a.stack.tryrelevance.com/latest/agents/hooks/custom-trigger/ca7f193a-f48c-41ab-8c3e-6833ec9a5001/e0119627-7d1b-4a8a-bd86-c0461f093fd8",
+    "RELEVANCE_TELEMETRY_WEBHOOK_KEY": "",
+    "POSTER_WEBHOOK_API_KEY": "996119739b42616a2f71765ae6f11a3d97acf9db6d79b39eea085e2ad4699c2f",
+    "DEFAULT_HOURLY_RATE": "25"
+  }
+}
