@@ -17,6 +17,7 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TableClient } from "@azure/data-tables";
+import { catalogCategory, catalogBaselineMinutes } from "../toolCatalog";
 
 // ── Table Storage Setup ──────────────────────────────────────────────────────
 
@@ -27,12 +28,14 @@ const connectionString =
 
 const eventsTable = TableClient.fromConnectionString(connectionString, "telemetryevents");
 const metricsTable = TableClient.fromConnectionString(connectionString, "telemetrymetrics");
+const insightTable = TableClient.fromConnectionString(connectionString, "weeklyinsight");
 
 let tablesReady = false;
 async function ensureTables(): Promise<void> {
   if (tablesReady) return;
   await eventsTable.createTable().catch(() => {});
   await metricsTable.createTable().catch(() => {});
+  await insightTable.createTable().catch(() => {});
   tablesReady = true;
 }
 
@@ -49,7 +52,7 @@ function safeJsonParse(value: string | undefined | null, fallback: any = {}): an
 
 // ── Shared: write event to Table Storage ─────────────────────────────────────
 
-async function writeEventToTable(event: any, context: InvocationContext): Promise<void> {
+export async function writeEventToTable(event: any, context: InvocationContext): Promise<void> {
   await ensureTables();
 
   const tenantId = event.tenant_id || "unknown";
@@ -83,6 +86,20 @@ async function writeEventToTable(event: any, context: InvocationContext): Promis
   if (eventType === "turn_completed") {
     entity.userHash = event.user_hash || "";
     entity.agentType = event.agent_type || "";
+    // HR Demand Intelligence — queryable columns for the demand/gaps endpoints.
+    if (event.answer_coverage) entity.answerCoverage = event.answer_coverage;
+    if (event.topic) entity.topic = event.topic;
+  }
+
+  // Sync-health tile: store the adjustment-sync outcome as queryable columns.
+  if (eventType === "adjustment_sync") {
+    entity.outcome = event.outcome || "";
+    entity.rows = event.rows ?? 0;
+    entity.durationMs = event.duration_ms ?? 0;
+  }
+
+  if (eventType === "escalation") {
+    entity.kind = event.kind || "";
   }
 
   try {
@@ -123,7 +140,7 @@ async function webhookHandler(request: HttpRequest, context: InvocationContext):
       return { status: 400, jsonBody: { error: "Missing event_type" } };
     }
 
-    if (!["turn_completed", "tool_executed"].includes(body.event_type)) {
+    if (!["turn_completed", "tool_executed", "adjustment_sync", "escalation"].includes(body.event_type)) {
       return { status: 400, jsonBody: { error: `Unknown event_type: ${body.event_type}` } };
     }
 
@@ -181,7 +198,22 @@ function getHandbookBaselines(): Record<string, number> {
 const HANDBOOK_BASELINES = getHandbookBaselines();
 
 function baselineMinutesForTool(toolName: string): number {
-  return HANDBOOK_BASELINES[toolName] || DEFAULT_BASELINE_MINUTES[toolName] || 3;
+  // Precedence: env override > vendored bot catalog > legacy map (pre-rename
+  // tool names still present in historical events) > 3-minute floor.
+  return HANDBOOK_BASELINES[toolName]
+    || catalogBaselineMinutes(toolName)
+    || DEFAULT_BASELINE_MINUTES[toolName]
+    || 3;
+}
+
+function categoryForTool(toolName: string): string {
+  // Catalog first (the bot owns the contract); prefix heuristic only for
+  // legacy names the catalog does not know.
+  return catalogCategory(toolName)
+    || (toolName.startsWith("create") || toolName.startsWith("update") || toolName.startsWith("cancel") ? "write"
+      : toolName.startsWith("approve") || toolName.startsWith("reject") ? "policy"
+      : toolName.startsWith("resolve") ? "resolver"
+      : "read");
 }
 
 async function dailyAggregation(_timer: unknown, context: InvocationContext): Promise<void> {
@@ -286,8 +318,180 @@ app.timer("dailyAggregation", {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// TRIGGER 2b: Timer — weekly HR demand insight digest (Mondays 06:00 UTC)
+// ══════════════════════════════════════════════════════════════════════════════
+// Composes the week's demand-by-topic and top content gaps per tenant and
+// stores the digest in the `weeklyinsight` table. This repo has no mail sender
+// (no SendGrid, no action-group hook), so SENDING is a follow-up: read the
+// newest row per tenant and mail it, or wire an action group to this table.
+
+async function weeklyInsight(_timer: unknown, context: InvocationContext): Promise<void> {
+  context.log("[WeeklyInsight] Composing weekly HR demand digest");
+  await ensureTables();
+
+  const now = Date.now();
+  const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const invertedStart = String(9999999999999 - now).padStart(13, "0");
+  const invertedEnd = String(9999999999999 - weekAgo).padStart(13, "0");
+  const weekEnd = new Date(now).toISOString().split("T")[0];
+
+  type TopicCounts = Record<string, { total: number; answered: number; deflected: number; not_in_docs: number; escalated: number }>;
+  const perTenant: Record<string, { byTopic: TopicCounts; tagged: number; untagged: number; escalations: Record<string, number> }> = {};
+
+  try {
+    const entities = eventsTable.listEntities({
+      queryOptions: { filter: `RowKey ge '${invertedStart}' and RowKey le '${invertedEnd}'` },
+    });
+
+    for await (const entity of entities) {
+      const p = safeJsonParse(entity.payload as string);
+      const tenantId = (p.tenant_id as string) || (entity.partitionKey as string) || "unknown";
+      if (!perTenant[tenantId]) perTenant[tenantId] = { byTopic: {}, tagged: 0, untagged: 0, escalations: {} };
+      const t = perTenant[tenantId];
+
+      if (entity.eventType === "turn_completed") {
+        if (!p.answer_coverage && !p.topic) { t.untagged++; continue; }
+        t.tagged++;
+        const topic = p.topic || "other";
+        if (!t.byTopic[topic]) t.byTopic[topic] = { total: 0, answered: 0, deflected: 0, not_in_docs: 0, escalated: 0 };
+        t.byTopic[topic].total++;
+        const cov = p.answer_coverage as string;
+        if (cov === "answered" || cov === "deflected" || cov === "not_in_docs" || cov === "escalated") {
+          (t.byTopic[topic] as any)[cov]++;
+        }
+      } else if (entity.eventType === "escalation") {
+        const kind = p.kind || "unknown";
+        t.escalations[kind] = (t.escalations[kind] || 0) + 1;
+      }
+    }
+
+    for (const [tenantId, t] of Object.entries(perTenant)) {
+      if (tenantId === "unknown" && t.tagged === 0 && Object.keys(t.escalations).length === 0) continue;
+
+      const topTopics = Object.entries(t.byTopic)
+        .map(([topic, c]) => ({ topic, ...c }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 10);
+      const topGaps = Object.entries(t.byTopic)
+        .map(([topic, c]) => ({ topic, unanswered: c.deflected + c.not_in_docs, not_in_docs: c.not_in_docs, deflected: c.deflected }))
+        .filter(g => g.unanswered > 0)
+        .sort((a, b) => b.unanswered - a.unanswered)
+        .slice(0, 5);
+
+      await insightTable.upsertEntity({
+        partitionKey: tenantId,
+        rowKey: weekEnd,
+        computedAt: new Date().toISOString(),
+        taggedTurns: t.tagged,
+        untaggedTurns: t.untagged,
+        topTopics: JSON.stringify(topTopics),
+        topGaps: JSON.stringify(topGaps),
+        escalationsByKind: JSON.stringify(t.escalations),
+        sent: false, // flips when a sender is wired
+      }, "Replace");
+
+      context.log(`[WeeklyInsight] ${tenantId} week-to-${weekEnd}: ${t.tagged} tagged turns, ${topGaps.length} gap topics`);
+    }
+  } catch (err) {
+    context.error("[WeeklyInsight] Error:", err);
+    throw err;
+  }
+}
+
+app.timer("weeklyInsight", {
+  schedule: "0 0 6 * * 1",
+  handler: weeklyInsight,
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // TRIGGER 3: HTTP — Dashboard API (6 endpoints)
 // ══════════════════════════════════════════════════════════════════════════════
+
+// ── Sync health (adjustment-sync tile) ───────────────────────────────────────
+// adjustment_sync events carry NO tenant_id (they come from a background job,
+// not a user turn), so they land in the "unknown" partition. Query by eventType
+// across partitions, bounded to the last 7 days via the inverted-timestamp
+// RowKey (recent events have SMALLER row keys).
+async function computeSyncHealth(context: InvocationContext): Promise<any> {
+  const staleMinutes = parseInt(process.env.SYNC_STALE_MINUTES || "120", 10);
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const invertedBound = String(9999999999999 - sevenDaysAgo).padStart(13, "0");
+
+  let lastRun: any = null;      // newest event of any outcome
+  let lastSuccess: any = null;  // newest success
+
+  try {
+    const entities = eventsTable.listEntities({
+      queryOptions: { filter: `RowKey le '${invertedBound}' and eventType eq 'adjustment_sync'` },
+    });
+    for await (const entity of entities) {
+      const p = safeJsonParse(entity.payload as string);
+      if (!p.timestamp) continue;
+      if (!lastRun || p.timestamp > lastRun.timestamp) lastRun = p;
+      if (p.outcome === "success" && (!lastSuccess || p.timestamp > lastSuccess.timestamp)) lastSuccess = p;
+    }
+  } catch (err) {
+    context.log("[Dashboard] sync-health scan failed");
+  }
+
+  if (!lastRun) {
+    return { has_data: false, stale: true, last_run: null, last_success: null };
+  }
+
+  const ageMinutes = lastSuccess
+    ? Math.round((Date.now() - new Date(lastSuccess.timestamp).getTime()) / 60000)
+    : null;
+
+  return {
+    has_data: true,
+    last_run: lastRun.timestamp,
+    last_outcome: lastRun.outcome,
+    last_reason: lastRun.reason || "",
+    last_rows: lastRun.rows ?? 0,
+    last_duration_ms: lastRun.duration_ms ?? 0,
+    last_success: lastSuccess ? lastSuccess.timestamp : null,
+    last_success_rows: lastSuccess ? lastSuccess.rows ?? 0 : 0,
+    age_minutes: ageMinutes,
+    stale: ageMinutes === null || ageMinutes > staleMinutes,
+    stale_threshold_minutes: staleMinutes,
+  };
+}
+
+// ── Demand / gaps aggregation over turn_completed events ─────────────────────
+// answer_coverage + topic are metadata-only fields on the turn envelope
+// (never message text). Turns from bot builds that predate the fields count
+// as "untagged" so the pages can show data coverage honestly.
+async function aggregateTurnTopics(tenantId: string, targetMonth: string): Promise<{
+  byTopic: Record<string, { total: number; answered: number; deflected: number; not_in_docs: number; escalated: number }>;
+  taggedTurns: number;
+  untaggedTurns: number;
+}> {
+  const byTopic: Record<string, { total: number; answered: number; deflected: number; not_in_docs: number; escalated: number }> = {};
+  let taggedTurns = 0;
+  let untaggedTurns = 0;
+
+  const entities = eventsTable.listEntities({
+    queryOptions: { filter: `PartitionKey eq '${tenantId}' and eventType eq 'turn_completed'` },
+  });
+  for await (const entity of entities) {
+    const p = safeJsonParse(entity.payload as string);
+    const ts = p.timestamp;
+    if (!ts || !ts.startsWith(targetMonth)) continue;
+
+    if (!p.answer_coverage && !p.topic) { untaggedTurns++; continue; }
+    taggedTurns++;
+
+    const topic = p.topic || "other";
+    if (!byTopic[topic]) byTopic[topic] = { total: 0, answered: 0, deflected: 0, not_in_docs: 0, escalated: 0 };
+    byTopic[topic].total++;
+    const cov = p.answer_coverage as string;
+    if (cov === "answered" || cov === "deflected" || cov === "not_in_docs" || cov === "escalated") {
+      byTopic[topic][cov]++;
+    }
+  }
+
+  return { byTopic, taggedTurns, untaggedTurns };
+}
 
 async function dashboardHandler(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   await ensureTables();
@@ -374,11 +578,14 @@ async function dashboardHandler(request: HttpRequest, context: InvocationContext
       const recomputedHoursSaved = recomputedTotalBaselineMinutes / 60;
       const recomputedCostSaved = recomputedHoursSaved * hourlyRate;
 
+      const syncHealth = await computeSyncHealth(context);
+
       return {
         status: 200,
         jsonBody: {
           tenant_id: tenantId,
           period: targetMonth,
+          sync_health: syncHealth,
           // ── FIX 4: Readiness flag for frontend ──
           // When false, Page 4 (Performance) shows EmptyState instead of misleading zeros.
           // When true, at least one turn_completed event exists — zeros are real zeros.
@@ -460,10 +667,7 @@ async function dashboardHandler(request: HttpRequest, context: InvocationContext
         const hrs = (count * mins) / 60;
         return {
           tool: name,
-          category: name.startsWith("create") || name.startsWith("update") || name.startsWith("cancel") ? "write"
-            : name.startsWith("approve") || name.startsWith("reject") ? "policy"
-            : name.startsWith("resolve") ? "resolver"
-            : "read",
+          category: categoryForTool(name),
           executions: count,
           baseline_minutes_per: mins,
           total_minutes_saved: count * mins,
@@ -669,8 +873,95 @@ async function dashboardHandler(request: HttpRequest, context: InvocationContext
       };
     }
 
+    // ── ENDPOINT 7: demand ─────────────────────────────────────────────────
+    // What employees ask, by HR theme, with the answered/deflected split.
+    if (endpoint === "demand") {
+      const targetMonth = period || new Date().toISOString().slice(0, 7);
+      const { byTopic, taggedTurns, untaggedTurns } = await aggregateTurnTopics(tenantId, targetMonth);
+
+      const topics = Object.entries(byTopic)
+        .map(([topic, c]) => ({
+          topic,
+          total: c.total,
+          answered: c.answered,
+          deflected: c.deflected,
+          not_in_docs: c.not_in_docs,
+          escalated: c.escalated,
+          answered_rate: c.total > 0 ? Math.round((c.answered / c.total) * 10000) / 100 : 0,
+        }))
+        .sort((a, b) => b.total - a.total);
+
+      return {
+        status: 200,
+        jsonBody: {
+          tenant_id: tenantId,
+          period: targetMonth,
+          tagged_turns: taggedTurns,
+          untagged_turns: untaggedTurns, // turns from bot builds without coverage fields
+          topics,
+        },
+      };
+    }
+
+    // ── ENDPOINT 8: gaps ───────────────────────────────────────────────────
+    // What the bot could NOT answer (deflected + not_in_docs), ranked by
+    // volume, plus data-quality escalations. Aggregate themes only — never
+    // message text (privacy: transcripts stay behind CONVERSATION_CAPTURE).
+    if (endpoint === "gaps") {
+      const targetMonth = period || new Date().toISOString().slice(0, 7);
+      const { byTopic, taggedTurns, untaggedTurns } = await aggregateTurnTopics(tenantId, targetMonth);
+
+      const gaps = Object.entries(byTopic)
+        .map(([topic, c]) => ({
+          topic,
+          deflected: c.deflected,
+          not_in_docs: c.not_in_docs,
+          escalated: c.escalated,
+          unanswered_total: c.deflected + c.not_in_docs,
+          topic_total: c.total,
+        }))
+        .filter(g => g.unanswered_total > 0)
+        .sort((a, b) => b.unanswered_total - a.unanswered_total);
+
+      // Escalation events carry an OPTIONAL tenant_id; those without one land
+      // in the "unknown" partition, so match on the payload, not the partition.
+      const escalations: any[] = [];
+      const escalationsByKind: Record<string, number> = {};
+      try {
+        const escEntities = eventsTable.listEntities({
+          queryOptions: { filter: `eventType eq 'escalation'` },
+        });
+        for await (const entity of escEntities) {
+          const p = safeJsonParse(entity.payload as string);
+          const ts = p.timestamp;
+          if (!ts || !ts.startsWith(targetMonth)) continue;
+          if (p.tenant_id && p.tenant_id !== tenantId) continue;
+          escalations.push({ kind: p.kind || "unknown", detail: p.detail || "", timestamp: ts });
+          escalationsByKind[p.kind || "unknown"] = (escalationsByKind[p.kind || "unknown"] || 0) + 1;
+        }
+        escalations.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+      } catch (err) {
+        context.log("[Dashboard] escalation scan failed");
+      }
+
+      return {
+        status: 200,
+        jsonBody: {
+          tenant_id: tenantId,
+          period: targetMonth,
+          tagged_turns: taggedTurns,
+          untagged_turns: untaggedTurns,
+          gaps,
+          escalations: escalations.slice(0, 100),
+          escalations_by_kind: Object.entries(escalationsByKind)
+            .map(([kind, count]) => ({ kind, count }))
+            .sort((a, b) => b.count - a.count),
+        },
+      };
+    }
+
     // ── Unknown endpoint ───────────────────────────────────────────────────
-    return { status: 400, jsonBody: { error: `Unknown endpoint: ${endpoint}`, available: ["summary", "trends", "tools", "events", "hourly", "users"] } };
+    return { status: 400, jsonBody: { error: `Unknown endpoint: ${endpoint}`, available: ["summary", "trends", "tools", "events", "hourly", "users", "demand", "gaps"] } };
   } catch (err: any) {
     context.error("[Dashboard] Error:", err);
     return { status: 500, jsonBody: { error: "Internal server error" } };
