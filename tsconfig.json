@@ -6,6 +6,12 @@
     "rootDir": ".",
     "sourceMap": true,
     "strict": false,
-    "esModuleInterop": true
-  }
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    "tests"
+  ]
 }

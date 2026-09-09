@@ -18,6 +18,8 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TableClient } from "@azure/data-tables";
 import { catalogCategory, catalogBaselineMinutes } from "../toolCatalog";
+import { composeDigest, type WeekData } from "../digest/compose";
+import { readSendConfig, sendDigest } from "../digest/send";
 
 // ── Table Storage Setup ──────────────────────────────────────────────────────
 
@@ -398,9 +400,86 @@ async function weeklyInsight(_timer: unknown, context: InvocationContext): Promi
   }
 }
 
+// ── Digest sending ───────────────────────────────────────────────────────────
+// Turns unsent weeklyinsight rows into emails via ACS. Inert unless
+// DIGEST_ENABLED=true and ACS_EMAIL_CONNECTION_STRING / DIGEST_FROM /
+// DIGEST_RECIPIENTS are all set. Idempotent (sent flag) and self-healing:
+// every weekly run retries unsent rows up to 14 days old.
+
+function rowToWeekData(entity: any): WeekData {
+  return {
+    weekEnd: String(entity.rowKey),
+    taggedTurns: Number(entity.taggedTurns) || 0,
+    untaggedTurns: Number(entity.untaggedTurns) || 0,
+    topTopics: safeJsonParse(entity.topTopics as string, []),
+    topGaps: safeJsonParse(entity.topGaps as string, []),
+    escalationsByKind: safeJsonParse(entity.escalationsByKind as string, {}),
+  };
+}
+
+export async function sendPendingDigests(context: InvocationContext): Promise<void> {
+  const cfg = readSendConfig();
+  if (!cfg) {
+    context.log("[Digest] disabled or not configured — skipping send");
+    return;
+  }
+  const dashboardUrl = process.env.DASHBOARD_URL || "https://www.mystudioagent.ai";
+  const minSensitiveCount = parseInt(process.env.DIGEST_MIN_SENSITIVE_COUNT || "5", 10);
+  const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const allowlist = (process.env.DIGEST_TENANT_ALLOWLIST || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const entities = insightTable.listEntities();
+  for await (const entity of entities) {
+    const tenantId = String(entity.partitionKey);
+    if (entity.sent === true) continue;
+    if (String(entity.rowKey) < cutoff) continue;
+    if (allowlist.length ? !allowlist.includes(tenantId) : tenantId === "unknown") continue;
+
+    const current = rowToWeekData(entity);
+    let previous: WeekData | null = null;
+    try {
+      const prevKey = new Date(new Date(`${current.weekEnd}T00:00:00Z`).getTime() - 7 * 86400000)
+        .toISOString()
+        .split("T")[0];
+      const prevEntity = await insightTable.getEntity(tenantId, prevKey);
+      previous = rowToWeekData(prevEntity);
+    } catch {
+      // no prior week — deltas omitted
+    }
+
+    const sync = await computeSyncHealth(context);
+    const digest = composeDigest(current, previous, sync, { dashboardUrl, minSensitiveCount });
+
+    try {
+      const id = await sendDigest(digest, cfg);
+      await insightTable.updateEntity(
+        { partitionKey: tenantId, rowKey: String(entity.rowKey), sent: true, sentAt: new Date().toISOString(), sendId: id, mode: digest.mode },
+        "Merge",
+      );
+      context.log(`[Digest] sent ${tenantId} week-to-${current.weekEnd} mode=${digest.mode} to ${cfg.recipients.length} recipient(s)`);
+    } catch (err: any) {
+      await insightTable
+        .updateEntity(
+          { partitionKey: tenantId, rowKey: String(entity.rowKey), sendError: String(err?.message || err).slice(0, 512) },
+          "Merge",
+        )
+        .catch(() => {});
+      context.error(`[Digest] send failed ${tenantId} week-to-${current.weekEnd}: ${err?.message || err}`);
+    }
+  }
+}
+
+async function weeklyInsightAndDigest(timer: unknown, context: InvocationContext): Promise<void> {
+  await weeklyInsight(timer, context);
+  await sendPendingDigests(context);
+}
+
 app.timer("weeklyInsight", {
   schedule: "0 0 6 * * 1",
-  handler: weeklyInsight,
+  handler: weeklyInsightAndDigest,
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
