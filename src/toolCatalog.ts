@@ -23,6 +23,7 @@ export const TOOL_CATALOG: Record<string, ToolCatalogEntry> = {
   list_locations: { category: "read", baseline_minutes: 2, write: false },
   list_working_patterns: { category: "read", baseline_minutes: 2, write: false },
   get_my_holiday_balance: { category: "read", baseline_minutes: 4, write: false, estimated: true },
+  find_colleague: { category: "read", baseline_minutes: 3, write: false, estimated: true },
 
   // ── Employee self-service: write ──────────────────────────────────────────
   create_my_leave_request: { category: "write", baseline_minutes: 5, write: true },

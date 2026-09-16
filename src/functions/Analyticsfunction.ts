@@ -17,7 +17,11 @@
 
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TableClient } from "@azure/data-tables";
-import { catalogCategory, catalogBaselineMinutes } from "../toolCatalog";
+import { baselineMinutesForTool, categoryForTool, baselineForTool, baselinesVersion, hourlyRate } from "../baselines";
+import { aggregateRange } from "../aggregation/aggregateDay";
+import { tableEventsStore, tableMetricsStore } from "../bi/store";
+import { configuredTenants, parseKeyConfig } from "../bi/auth";
+import { addDays, isoDate } from "../bi/util";
 import { composeDigest, type WeekData } from "../digest/compose";
 import { readSendConfig, sendDigest } from "../digest/send";
 
@@ -166,148 +170,39 @@ app.http("analyticsWebhook", {
 // TRIGGER 2: Timer — daily metrics aggregation
 // ══════════════════════════════════════════════════════════════════════════════
 
-const DEFAULT_BASELINE_MINUTES: Record<string, number> = {
-  get_my_employee_details: 3, create_my_leave_request: 5, list_my_absences: 3,
-  list_my_bonuses: 4, list_departments: 2, list_divisions: 2, list_locations: 2,
-  list_working_patterns: 2, list_employees: 3, get_employee_details: 3,
-  create_employee: 15, create_employee_change_request: 7, list_change_requests: 3,
-  approve_change_request: 5, list_leave_requests: 3, get_leave_request: 3,
-  create_leave_request: 5, approve_leave_request: 3, reject_leave_request: 5,
-  list_absences: 3, cancel_absence: 5, list_all_bonuses: 3,
-  list_employee_bonuses: 3, get_company_account_details: 3, list_holiday_allowances: 3,
-  resolve_employee_id: 1, list_my_sicknesses: 3, list_sicknesses: 3,
-  update_sickness: 5, approve_leave_request_admin: 3, reject_leave_request_admin: 5,
-  create_leave_request_admin: 5, get_leave_request_admin: 3, list_leave_requests_admin: 3,
-};
+// Baseline precedence and tool categories live in src/baselines.ts (shared with
+// the BI API and the aggregation module) — moved verbatim, behaviour unchanged.
 
-function getHandbookBaselines(): Record<string, number> {
-  try {
-    const raw = process.env.HANDBOOK_BASELINE_MINUTES_JSON;
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    const clean: Record<string, number> = {};
-    for (const [k, v] of Object.entries(parsed)) {
-      const n = Number(v);
-      if (Number.isFinite(n) && n > 0) clean[k] = n;
-    }
-    return clean;
-  } catch {
-    return {};
-  }
-}
-
-const HANDBOOK_BASELINES = getHandbookBaselines();
-
-function baselineMinutesForTool(toolName: string): number {
-  // Precedence: env override > vendored bot catalog > legacy map (pre-rename
-  // tool names still present in historical events) > 3-minute floor.
-  return HANDBOOK_BASELINES[toolName]
-    || catalogBaselineMinutes(toolName)
-    || DEFAULT_BASELINE_MINUTES[toolName]
-    || 3;
-}
-
-function categoryForTool(toolName: string): string {
-  // Catalog first (the bot owns the contract); prefix heuristic only for
-  // legacy names the catalog does not know.
-  return catalogCategory(toolName)
-    || (toolName.startsWith("create") || toolName.startsWith("update") || toolName.startsWith("cancel") ? "write"
-      : toolName.startsWith("approve") || toolName.startsWith("reject") ? "policy"
-      : toolName.startsWith("resolve") ? "resolver"
-      : "read");
-}
+// Daily aggregation: re-aggregates the trailing 7 UTC days every night with a
+// Replace-upsert, so a missed run self-heals and every known tenant gets a row
+// even on a quiet day (the BI API tells "quiet" from "missing" by that row).
+// Longer gaps: POST /api/admin/aggregate (src/functions/adminAggregate.ts).
+const AGGREGATION_TRAILING_DAYS = 7;
 
 async function dailyAggregation(_timer: unknown, context: InvocationContext): Promise<void> {
-  context.log("[Aggregation] Starting daily metrics");
+  context.log(`[Aggregation] Starting daily metrics (trailing ${AGGREGATION_TRAILING_DAYS} days)`);
   await ensureTables();
 
-  const yesterday = new Date();
-  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-  const dateStr = yesterday.toISOString().split("T")[0];
+  const metrics = tableMetricsStore(metricsTable);
+  const events = tableEventsStore(eventsTable);
+  const known = new Set<string>([...configuredTenants(parseKeyConfig(process.env.BI_API_KEYS)), ...(await metrics.tenants())]);
+  known.delete("unknown");
+  const rate = hourlyRate();
 
-  const dayStart = new Date(`${dateStr}T00:00:00.000Z`).getTime();
-  const dayEnd = new Date(`${dateStr}T23:59:59.999Z`).getTime();
-  const invertedEnd = String(9999999999999 - dayStart).padStart(13, "0");
-  const invertedStart = String(9999999999999 - dayEnd).padStart(13, "0");
-
-  const hourlyRate = parseFloat(process.env.DEFAULT_HOURLY_RATE || "45");
-
-  const tenantData: Record<string, { turns: any[]; toolExecs: any[]; users: Set<string> }> = {};
+  const yesterday = addDays(isoDate(new Date()), -1);
+  const from = addDays(yesterday, -(AGGREGATION_TRAILING_DAYS - 1));
 
   try {
-    const entities = eventsTable.listEntities({
-      queryOptions: { filter: `RowKey ge '${invertedStart}' and RowKey le '${invertedEnd}'` },
+    await aggregateRange(from, yesterday, {
+      scanEvents: (ge, le) => events.scanEvents(ge, le),
+      upsertMetrics: (e) => metrics.upsert(e),
+      knownTenants: Array.from(known),
+      rate,
+      baselineFn: (t) => baselineForTool(t).minutes,
+      baselineEstimatedFn: (t) => baselineForTool(t).estimated,
+      baselinesVersion: baselinesVersion({ rate }),
+      log: (m) => context.log(m),
     });
-
-    for await (const entity of entities) {
-      const tenantId = entity.partitionKey as string;
-      if (!tenantData[tenantId]) {
-        tenantData[tenantId] = { turns: [], toolExecs: [], users: new Set() };
-      }
-      const payload = safeJsonParse(entity.payload as string);
-
-      if (entity.eventType === "turn_completed") {
-        tenantData[tenantId].turns.push(payload);
-        if (payload.user_hash) tenantData[tenantId].users.add(payload.user_hash);
-      } else if (entity.eventType === "tool_executed") {
-        tenantData[tenantId].toolExecs.push(payload);
-      }
-    }
-
-    for (const [tenantId, data] of Object.entries(tenantData)) {
-      const { turns, toolExecs, users } = data;
-
-      const successCount = turns.filter(t => t.outcome === "success").length;
-      const errorCount = turns.filter(t => t.outcome === "error").length;
-      const emptyCount = turns.filter(t => t.outcome === "empty_reply").length;
-
-      const latencies = turns.map(t => t.latency_total_ms).filter(l => typeof l === "number").sort((a, b) => a - b);
-      const avgLatency = latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0;
-      const p95Latency = latencies.length > 0 ? latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)] : 0;
-
-      const toolCounts: Record<string, number> = {};
-      for (const exec of toolExecs) {
-        const name = exec.tool_name || "unknown";
-        toolCounts[name] = (toolCounts[name] || 0) + 1;
-      }
-
-      let totalBaselineMinutes = 0;
-      for (const exec of toolExecs) {
-        const toolName = exec.tool_name || "unknown";
-        // Supports explicit per-event estimate from handbook instrumentation, else falls back.
-        const manualMinutes = Number(exec.estimated_manual_minutes);
-        const baseline = Number.isFinite(manualMinutes) && manualMinutes > 0
-          ? manualMinutes
-          : baselineMinutesForTool(toolName);
-        totalBaselineMinutes += baseline;
-      }
-
-      const hoursSaved = totalBaselineMinutes / 60;
-      const costSaved = hoursSaved * hourlyRate;
-
-      await metricsTable.upsertEntity({
-        partitionKey: tenantId,
-        rowKey: dateStr,
-        computedAt: new Date().toISOString(),
-        totalTurns: turns.length,
-        totalToolExecutions: toolExecs.length,
-        uniqueUsers: users.size,
-        successCount, errorCount, emptyReplyCount: emptyCount,
-        successRate: turns.length > 0 ? successCount / turns.length : 0,
-        avgLatencyMs: Math.round(avgLatency),
-        p95LatencyMs: Math.round(p95Latency),
-        employeeTurns: turns.filter(t => t.agent_type === "employee").length,
-        adminTurns: turns.filter(t => t.agent_type === "admin").length,
-        toolCounts: JSON.stringify(toolCounts),
-        totalBaselineMinutes,
-        hoursSaved: Math.round(hoursSaved * 100) / 100,
-        costSaved: Math.round(costSaved * 100) / 100,
-        hourlyRate,
-      }, "Replace");
-
-      context.log(`[Aggregation] ${tenantId} ${dateStr}: ${turns.length} turns, ${toolExecs.length} tools, £${costSaved.toFixed(2)} saved`);
-    }
   } catch (err) {
     context.error("[Aggregation] Error:", err);
     throw err;
@@ -572,11 +467,16 @@ async function aggregateTurnTopics(tenantId: string, targetMonth: string): Promi
   return { byTopic, taggedTurns, untaggedTurns };
 }
 
+// GUIDs, probe tenants ("queue-probe") and correlation ids all match; quotes and spaces do not.
+const SAFE_ID = /^[A-Za-z0-9._-]{1,64}$/;
+
 async function dashboardHandler(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   await ensureTables();
 
   const tenantId = request.query.get("tenant_id");
   if (!tenantId) return { status: 400, jsonBody: { error: "tenant_id required" } };
+  // Identifier-shaped only: closes the OData filter injection on this anonymous route.
+  if (!SAFE_ID.test(tenantId)) return { status: 400, jsonBody: { error: "tenant_id invalid" } };
 
   const endpoint = request.query.get("endpoint") || "summary";
   const period = request.query.get("period");
@@ -783,6 +683,7 @@ async function dashboardHandler(request: HttpRequest, context: InvocationContext
     if (endpoint === "events") {
       const correlationId = request.query.get("correlation_id");
       if (!correlationId) return { status: 400, jsonBody: { error: "correlation_id required" } };
+      if (!SAFE_ID.test(correlationId)) return { status: 400, jsonBody: { error: "correlation_id invalid" } };
 
       // FIX 1 enables this query to work: correlationId is now stored as a table column.
       // NOTE: Events ingested BEFORE this fix won't have the column and won't appear

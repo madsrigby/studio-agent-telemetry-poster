@@ -8,7 +8,7 @@
     "RELEVANCE_TELEMETRY_WEBHOOK_URL": "https://api-bcbe5a.stack.tryrelevance.com/latest/agents/hooks/custom-trigger/ca7f193a-f48c-41ab-8c3e-6833ec9a5001/e0119627-7d1b-4a8a-bd86-c0461f093fd8",
     "RELEVANCE_TELEMETRY_WEBHOOK_KEY": "",
     "POSTER_WEBHOOK_API_KEY": "",
-    "DEFAULT_HOURLY_RATE": "25",
+    "DEFAULT_HOURLY_RATE": "45",
     "ACS_EMAIL_CONNECTION_STRING": "",
     "DIGEST_ENABLED": "",
     "DIGEST_FROM": "",
@@ -16,6 +16,12 @@
     "DIGEST_MIN_SENSITIVE_COUNT": "",
     "DASHBOARD_URL": "",
     "SYNC_STALE_MINUTES": "",
-    "DIGEST_TENANT_ALLOWLIST": ""
+    "DIGEST_TENANT_ALLOWLIST": "",
+    "BI_API_KEYS": "",
+    "BI_PIPELINE_STALE_HOURS": "",
+    "BI_PUBLIC_BASE_URL": "",
+    "BI_DEADLINE_MS": "",
+    "BI_SENSITIVE_FLOOR": "",
+    "HANDBOOK_BASELINE_MINUTES_JSON": ""
   }
 }
