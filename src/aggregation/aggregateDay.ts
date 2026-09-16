@@ -11,7 +11,7 @@ import { safeJsonParse, invertedTs, eachDay, round2 } from "../bi/util";
 export const SENSITIVE_TOPICS = ["conduct_grievance", "wellbeing"];
 export const KNOWN_COVERAGE = ["answered", "deflected", "not_in_docs", "escalated"] as const;
 export const UNTAGGED_TOPIC = "untagged";
-export const OUTCOMES = ["ANSWERED", "NOT_COVERED", "RETRIEVAL_MISS", "TOOL_FAILED", "OUT_OF_SCOPE"] as const;
+export const OUTCOMES = ["ANSWERED", "NOT_COVERED", "RETRIEVAL_MISS", "NO_CLAIM_KEPT", "TOOL_FAILED", "OUT_OF_SCOPE"] as const;
 
 export interface OutcomeStats {
   counts: Record<string, number>; // OUTCOMES ∪ "other"

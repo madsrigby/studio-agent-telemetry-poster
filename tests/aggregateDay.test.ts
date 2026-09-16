@@ -155,7 +155,7 @@ describe("engine verdicts (turn_outcome) and build identity", () => {
   it("counts outcomes, tokens, tool calls and claim stats; unknown outcomes go to other", () => {
     const outcomes = [oc({ outcome: "ANSWERED" }), oc({ outcome: "RETRIEVAL_MISS", claims_kept: -1, claims_dropped: -1 }), oc({ outcome: "NOT_COVERED" }), oc({ outcome: "TOOL_FAILED", tool_errors: 2 }), oc({ outcome: "WEIRD" })];
     const m = computeDayMetrics({ turns: [], toolExecs: [], outcomes, ...base });
-    expect(m.outcomes.counts).toEqual({ ANSWERED: 1, NOT_COVERED: 1, RETRIEVAL_MISS: 1, TOOL_FAILED: 1, OUT_OF_SCOPE: 0, other: 1 });
+    expect(m.outcomes.counts).toEqual({ ANSWERED: 1, NOT_COVERED: 1, RETRIEVAL_MISS: 1, NO_CLAIM_KEPT: 0, TOOL_FAILED: 1, OUT_OF_SCOPE: 0, other: 1 });
     expect(m.outcomes.sampleN).toBe(5);
     expect(m.outcomes.totalTokens).toBe(500);
     expect(m.outcomes.toolCalls).toBe(5);
