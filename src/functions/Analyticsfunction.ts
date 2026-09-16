@@ -176,7 +176,7 @@ app.http("analyticsWebhook", {
 // Daily aggregation: re-aggregates the trailing 7 UTC days every night with a
 // Replace-upsert, so a missed run self-heals and every known tenant gets a row
 // even on a quiet day (the BI API tells "quiet" from "missing" by that row).
-// Longer gaps: POST /api/admin/aggregate (src/functions/adminAggregate.ts).
+// Longer gaps: POST /api/ops/aggregate (src/functions/adminAggregate.ts).
 const AGGREGATION_TRAILING_DAYS = 7;
 
 async function dailyAggregation(_timer: unknown, context: InvocationContext): Promise<void> {

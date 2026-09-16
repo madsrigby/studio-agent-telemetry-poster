@@ -1,4 +1,4 @@
-// adminAggregate.ts — POST /api/admin/aggregate?from=YYYY-MM-DD&to=YYYY-MM-DD
+// adminAggregate.ts — POST /api/ops/aggregate?from=YYYY-MM-DD&to=YYYY-MM-DD
 // Re-aggregates a day range into telemetrymetrics (idempotent). Protected by
 // the Function App host key (authLevel "function"), so no new auth code.
 // Max 92 days per call; call repeatedly for longer gaps.
@@ -55,6 +55,6 @@ export async function adminAggregateHandler(request: HttpRequest, context: Invoc
 app.http("adminAggregate", {
   methods: ["POST"],
   authLevel: "function",
-  route: "admin/aggregate",
+  route: "ops/aggregate",
   handler: adminAggregateHandler,
 });

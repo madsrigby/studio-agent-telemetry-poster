@@ -119,7 +119,7 @@ quiet day is distinguishable from a missed run. Longer gaps:
 
 ```
 HOSTKEY=$(az functionapp keys list -g rg-StudioAgent16fddc-dev -n studioagent-telemetry-poster --query functionKeys.default -o tsv)
-curl -sS -X POST "$BASE/api/admin/aggregate?from=2026-06-01&to=2026-08-31&code=$HOSTKEY"   # ≤ 92 days per call
+curl -sS -X POST "$BASE/api/ops/aggregate?from=2026-06-01&to=2026-08-31&code=$HOSTKEY"   # ≤ 92 days per call
 ```
 
 ### Runbook: "the BI tool shows zeros"
