@@ -73,6 +73,7 @@ and `tenant_id`. All dates are UTC calendar days. Currency is GBP.
 |---|---|---|---|
 | health | `/api/v1/bi/health` | – | `status` ok / degraded / no_data; pipeline freshness and aggregation currency |
 | daily | `/api/v1/bi/daily` | `from`,`to`,`limit`,`cursor` | one row per day; `to` clamps to yesterday; a day with no aggregate row is returned with `aggregation_status: "missing"` and null numbers, never omitted |
+| daily (engine verdicts) | same row | – | `outcome_answered/not_covered/retrieval_miss/tool_failed/out_of_scope/other`, `outcome_sample_n`, `retrieval_miss_rate`, `not_covered_rate`, `tool_failed_rate`, `total_tokens`, `tool_calls`, `tool_errors`, `claims_kept`, `claims_dropped`, `claims_sample_n`, `build_sha`, `build_shas`. Null until a bot build that enqueues `turn_outcome` is deployed. |
 | tool_daily | `/api/v1/bi/tool_daily` | as daily | one row per (day, tool) with executions > 0 |
 | topics_daily | `/api/v1/bi/topics_daily` | as daily | one row per (day, topic); coverage joined with outcome; counts 1–4 on `conduct_grievance` / `wellbeing` are suppressed (`suppressed: true`) |
 | monthly | `/api/v1/bi/monthly` | `from`,`to` (YYYY-MM), `limit` | hero-metric names and formulas identical to `dashboardApi` summary; current month has `is_complete_month: false` |

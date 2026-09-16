@@ -147,3 +147,53 @@ describe("aggregateDay / aggregateRange", () => {
     expect(next >= b.rowKeyGe).toBe(false);
   });
 });
+
+describe("engine verdicts (turn_outcome) and build identity", () => {
+  const base = { rate: 45, baselineFn: () => 2, baselineEstimatedFn: () => false, baselinesVersion: "v1" };
+  const oc = (o: Record<string, unknown>) => ({ event_type: "turn_outcome", total_tokens: 100, tool_calls: 1, tool_errors: 0, claims_kept: 3, claims_dropped: 1, ...o });
+
+  it("counts outcomes, tokens, tool calls and claim stats; unknown outcomes go to other", () => {
+    const outcomes = [oc({ outcome: "ANSWERED" }), oc({ outcome: "RETRIEVAL_MISS", claims_kept: -1, claims_dropped: -1 }), oc({ outcome: "NOT_COVERED" }), oc({ outcome: "TOOL_FAILED", tool_errors: 2 }), oc({ outcome: "WEIRD" })];
+    const m = computeDayMetrics({ turns: [], toolExecs: [], outcomes, ...base });
+    expect(m.outcomes.counts).toEqual({ ANSWERED: 1, NOT_COVERED: 1, RETRIEVAL_MISS: 1, TOOL_FAILED: 1, OUT_OF_SCOPE: 0, other: 1 });
+    expect(m.outcomes.sampleN).toBe(5);
+    expect(m.outcomes.totalTokens).toBe(500);
+    expect(m.outcomes.toolCalls).toBe(5);
+    expect(m.outcomes.toolErrors).toBe(2);
+    expect(m.outcomes.claimsSampleN).toBe(4); // the -1 row is excluded
+    expect(m.outcomes.claimsKept).toBe(12);
+    expect(m.outcomes.claimsDropped).toBe(4);
+  });
+
+  it("collects distinct build shas in time order and picks the newest", () => {
+    const turns = [
+      turn({ build_sha: "old1", timestamp: "2026-09-10T08:00:00Z" }),
+      turn({ build_sha: "new2", timestamp: "2026-09-10T12:00:00Z" }),
+      turn({ build_sha: "old1", timestamp: "2026-09-10T09:00:00Z" }),
+      turn({}),
+    ];
+    const m = computeDayMetrics({ turns, toolExecs: [], ...base });
+    expect(m.buildShas).toEqual(["old1", "new2"]);
+    expect(m.buildSha).toBe("new2");
+    const e = metricsEntity("t1", "2026-09-10", m, "now");
+    expect(JSON.parse(e.buildShas)).toEqual(["old1", "new2"]);
+    expect(e.buildSha).toBe("new2");
+    expect(typeof e.outcomeCounts).toBe("string");
+  });
+
+  it("old callers without outcomes get zeroed stats and an empty build sha", () => {
+    const m = computeDayMetrics({ turns: [turn({})], toolExecs: [], ...base });
+    expect(m.outcomes.sampleN).toBe(0);
+    expect(m.buildSha).toBe("");
+  });
+
+  it("aggregateDay routes turn_outcome rows into the tenant's outcomes", async () => {
+    const { deps, written } = fakeDeps([
+      { date: "2026-09-10", partitionKey: "t1", payload: turn({}) },
+      { date: "2026-09-10", partitionKey: "t1", payload: oc({ outcome: "RETRIEVAL_MISS" }) },
+    ]);
+    await aggregateDay("2026-09-10", deps);
+    expect(JSON.parse(written[0].outcomeCounts).RETRIEVAL_MISS).toBe(1);
+    expect(written[0].outcomeSampleN).toBe(1);
+  });
+});

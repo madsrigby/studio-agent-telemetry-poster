@@ -108,6 +108,14 @@ export async function writeEventToTable(event: any, context: InvocationContext):
     entity.kind = event.kind || "";
   }
 
+  // Engine verdict per turn (BI feed phase 2): queryable columns, never text.
+  if (eventType === "turn_outcome") {
+    entity.outcome = event.outcome || "";
+    entity.subKind = event.sub_kind || "";
+    entity.route = event.route || "";
+    entity.buildSha = event.build_sha || "";
+  }
+
   try {
     await eventsTable.createEntity(entity);
     context.log(`[Analytics] Stored ${eventType}: ${entity.rowKey}`);
@@ -146,7 +154,7 @@ async function webhookHandler(request: HttpRequest, context: InvocationContext):
       return { status: 400, jsonBody: { error: "Missing event_type" } };
     }
 
-    if (!["turn_completed", "tool_executed", "adjustment_sync", "escalation"].includes(body.event_type)) {
+    if (!["turn_completed", "tool_executed", "adjustment_sync", "escalation", "turn_outcome"].includes(body.event_type)) {
       return { status: 400, jsonBody: { error: `Unknown event_type: ${body.event_type}` } };
     }
 

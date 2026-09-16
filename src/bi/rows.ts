@@ -36,6 +36,52 @@ function recompute(toolCounts: Record<string, number>, ctx: RowCtx): { minutes: 
   return { minutes, hours: round2(hours), cost: round2(hours * ctx.rate) };
 }
 
+// ── engine verdicts (turn_outcome), null when the row predates them ──────────
+
+const OUTCOME_NULLS = {
+  outcome_answered: null,
+  outcome_not_covered: null,
+  outcome_retrieval_miss: null,
+  outcome_tool_failed: null,
+  outcome_out_of_scope: null,
+  outcome_other: null,
+  outcome_sample_n: null,
+  retrieval_miss_rate: null,
+  not_covered_rate: null,
+  tool_failed_rate: null,
+  total_tokens: null,
+  tool_calls: null,
+  tool_errors: null,
+  claims_kept: null,
+  claims_dropped: null,
+  claims_sample_n: null,
+} as const;
+
+function outcomeColumns(entity: any): Record<keyof typeof OUTCOME_NULLS, number | null> {
+  if (typeof entity?.outcomeCounts !== "string") return { ...OUTCOME_NULLS };
+  const c = safeJsonParse(entity.outcomeCounts, {}) as Record<string, number>;
+  const n = num(entity.outcomeSampleN) ?? 0;
+  const g = (k: string) => num(c[k]) ?? 0;
+  return {
+    outcome_answered: g("ANSWERED"),
+    outcome_not_covered: g("NOT_COVERED"),
+    outcome_retrieval_miss: g("RETRIEVAL_MISS"),
+    outcome_tool_failed: g("TOOL_FAILED"),
+    outcome_out_of_scope: g("OUT_OF_SCOPE"),
+    outcome_other: g("other"),
+    outcome_sample_n: n,
+    retrieval_miss_rate: rate(g("RETRIEVAL_MISS"), n),
+    not_covered_rate: rate(g("NOT_COVERED"), n),
+    tool_failed_rate: rate(g("TOOL_FAILED"), n),
+    total_tokens: num(entity.totalTokens) ?? 0,
+    tool_calls: num(entity.toolCallsTotal) ?? 0,
+    tool_errors: num(entity.toolErrorsTotal) ?? 0,
+    claims_kept: num(entity.claimsKept) ?? 0,
+    claims_dropped: num(entity.claimsDropped) ?? 0,
+    claims_sample_n: num(entity.claimsSampleN) ?? 0,
+  };
+}
+
 // ── daily ─────────────────────────────────────────────────────────────────────
 
 export function dailyRow(ctx: RowCtx, date: string, entity: any | null): FlatRow {
@@ -67,6 +113,9 @@ export function dailyRow(ctx: RowCtx, date: string, entity: any | null): FlatRow
       cost_saved_current: null,
       baselines_version: null,
       baseline_status: null,
+      ...OUTCOME_NULLS,
+      build_sha: null,
+      build_shas: null,
       hourly_rate: ctx.rate,
       currency: ctx.currency ?? CURRENCY,
     };
@@ -103,6 +152,9 @@ export function dailyRow(ctx: RowCtx, date: string, entity: any | null): FlatRow
     cost_saved_current: current.cost,
     baselines_version: typeof entity.baselinesVersion === "string" ? entity.baselinesVersion : null,
     baseline_status: typeof entity.baselineStatus === "string" ? entity.baselineStatus : null,
+    ...outcomeColumns(entity),
+    build_sha: typeof entity.buildSha === "string" && entity.buildSha ? entity.buildSha : null,
+    build_shas: typeof entity.buildShas === "string" ? (safeJsonParse(entity.buildShas, []) as string[]).join(",") || null : null,
     hourly_rate: num(entity.hourlyRate) ?? ctx.rate,
     currency: ctx.currency ?? CURRENCY,
   };

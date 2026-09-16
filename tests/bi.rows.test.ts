@@ -183,3 +183,21 @@ describe("privacy", () => {
     }
   });
 });
+
+describe("dailyRow outcome and build columns", () => {
+  it("are null for rows written before phase 2, and computed with denominators after", () => {
+    const old = dailyRow(ctx, "2026-09-10", entity());
+    expect(old.outcome_sample_n).toBeNull();
+    expect(old.retrieval_miss_rate).toBeNull();
+    expect(old.build_sha).toBeNull();
+    const m = computeDayMetrics({
+      turns: [{ outcome: "success", build_sha: "abc", timestamp: "2026-09-10T10:00:00Z" }],
+      toolExecs: [],
+      outcomes: [{ outcome: "RETRIEVAL_MISS", total_tokens: 10, tool_calls: 0, tool_errors: 0, claims_kept: -1 }, { outcome: "ANSWERED", total_tokens: 20, tool_calls: 1, tool_errors: 0, claims_kept: 2, claims_dropped: 0 }],
+      rate: 45, baselineFn: () => 2, baselineEstimatedFn: () => false, baselinesVersion: "v",
+    });
+    const r = dailyRow(ctx, "2026-09-10", metricsEntity("t1", "2026-09-10", m, "now"));
+    expect(r).toMatchObject({ outcome_answered: 1, outcome_retrieval_miss: 1, outcome_sample_n: 2, retrieval_miss_rate: 0.5, not_covered_rate: 0, total_tokens: 30, tool_calls: 1, claims_kept: 2, claims_sample_n: 1, build_sha: "abc", build_shas: "abc" });
+    assertFlat(r);
+  });
+});

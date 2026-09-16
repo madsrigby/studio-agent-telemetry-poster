@@ -11,6 +11,18 @@ import { safeJsonParse, invertedTs, eachDay, round2 } from "../bi/util";
 export const SENSITIVE_TOPICS = ["conduct_grievance", "wellbeing"];
 export const KNOWN_COVERAGE = ["answered", "deflected", "not_in_docs", "escalated"] as const;
 export const UNTAGGED_TOPIC = "untagged";
+export const OUTCOMES = ["ANSWERED", "NOT_COVERED", "RETRIEVAL_MISS", "TOOL_FAILED", "OUT_OF_SCOPE"] as const;
+
+export interface OutcomeStats {
+  counts: Record<string, number>; // OUTCOMES ∪ "other"
+  sampleN: number;
+  totalTokens: number;
+  toolCalls: number;
+  toolErrors: number;
+  claimsKept: number;
+  claimsDropped: number;
+  claimsSampleN: number; // turns where the attributed path ran (claims >= 0)
+}
 
 export interface TopicCount {
   turns: number;
@@ -46,11 +58,17 @@ export interface DayMetrics {
   taggedTurns: number;
   untaggedTurns: number;
   topicCounts: Record<string, TopicCount>;
+  outcomes: OutcomeStats;
+  /** distinct build_sha values seen on turns that day; newest last */
+  buildShas: string[];
+  buildSha: string;
 }
 
 export interface ComputeInput {
   turns: any[];
   toolExecs: any[];
+  /** turn_outcome payloads (engine verdicts); optional for old callers */
+  outcomes?: any[];
   rate: number;
   baselineFn: (tool: string) => number;
   baselineEstimatedFn: (tool: string) => boolean;
@@ -63,6 +81,7 @@ function emptyTopic(): TopicCount {
 
 export function computeDayMetrics(input: ComputeInput): DayMetrics {
   const { turns, toolExecs, rate, baselineFn, baselineEstimatedFn, baselinesVersion } = input;
+  const outcomeEvents = input.outcomes ?? [];
 
   const users = new Set<string>();
   for (const t of turns) if (t.user_hash) users.add(t.user_hash);
@@ -128,6 +147,31 @@ export function computeDayMetrics(input: ComputeInput): DayMetrics {
     else c.unknown++;
   }
 
+  const oc: Record<string, number> = {};
+  for (const o of OUTCOMES) oc[o] = 0;
+  oc.other = 0;
+  const outcomes: OutcomeStats = { counts: oc, sampleN: 0, totalTokens: 0, toolCalls: 0, toolErrors: 0, claimsKept: 0, claimsDropped: 0, claimsSampleN: 0 };
+  for (const o of outcomeEvents) {
+    outcomes.sampleN++;
+    const k = typeof o.outcome === "string" && (OUTCOMES as readonly string[]).includes(o.outcome) ? o.outcome : "other";
+    oc[k]++;
+    const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    outcomes.totalTokens += n(o.total_tokens);
+    outcomes.toolCalls += n(o.tool_calls);
+    outcomes.toolErrors += n(o.tool_errors);
+    if (typeof o.claims_kept === "number" && o.claims_kept >= 0) {
+      outcomes.claimsSampleN++;
+      outcomes.claimsKept += o.claims_kept;
+      outcomes.claimsDropped += n(o.claims_dropped);
+    }
+  }
+
+  const shaByTime = turns
+    .filter((t) => typeof t.build_sha === "string" && t.build_sha)
+    .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+  const buildShas = Array.from(new Set(shaByTime.map((t) => String(t.build_sha))));
+  const buildSha = buildShas.length ? buildShas[buildShas.length - 1] : "";
+
   return {
     totalTurns: turns.length,
     turnsSubstantive,
@@ -152,6 +196,9 @@ export function computeDayMetrics(input: ComputeInput): DayMetrics {
     taggedTurns: tagged,
     untaggedTurns: untagged,
     topicCounts,
+    outcomes,
+    buildShas,
+    buildSha,
   };
 }
 
@@ -191,6 +238,16 @@ export function metricsEntity(tenantId: string, dateStr: string, m: DayMetrics, 
     taggedTurns: m.taggedTurns,
     untaggedTurns: m.untaggedTurns,
     topicCounts: JSON.stringify(m.topicCounts),
+    outcomeCounts: JSON.stringify(m.outcomes.counts),
+    outcomeSampleN: m.outcomes.sampleN,
+    totalTokens: m.outcomes.totalTokens,
+    toolCallsTotal: m.outcomes.toolCalls,
+    toolErrorsTotal: m.outcomes.toolErrors,
+    claimsKept: m.outcomes.claimsKept,
+    claimsDropped: m.outcomes.claimsDropped,
+    claimsSampleN: m.outcomes.claimsSampleN,
+    buildShas: JSON.stringify(m.buildShas),
+    buildSha: m.buildSha,
   };
 }
 
@@ -219,9 +276,9 @@ export const MAX_RANGE_DAYS = 92;
 
 export async function aggregateDay(dateStr: string, deps: AggregateDeps): Promise<{ date: string; tenants: string[] }> {
   const { rowKeyGe, rowKeyLe } = dayRowKeyBounds(dateStr);
-  const tenantData: Record<string, { turns: any[]; toolExecs: any[] }> = {};
+  const tenantData: Record<string, { turns: any[]; toolExecs: any[]; outcomes: any[] }> = {};
   const ensure = (t: string) => {
-    if (!tenantData[t]) tenantData[t] = { turns: [], toolExecs: [] };
+    if (!tenantData[t]) tenantData[t] = { turns: [], toolExecs: [], outcomes: [] };
     return tenantData[t];
   };
   for (const t of deps.knownTenants) ensure(t);
@@ -231,6 +288,7 @@ export async function aggregateDay(dateStr: string, deps: AggregateDeps): Promis
     const payload = safeJsonParse(row.payload);
     if (row.eventType === "turn_completed") ensure(tenantId).turns.push(payload);
     else if (row.eventType === "tool_executed") ensure(tenantId).toolExecs.push(payload);
+    else if (row.eventType === "turn_outcome") ensure(tenantId).outcomes.push(payload);
   }
 
   const computedAt = (deps.now ? deps.now() : new Date()).toISOString();
@@ -239,6 +297,7 @@ export async function aggregateDay(dateStr: string, deps: AggregateDeps): Promis
     const m = computeDayMetrics({
       turns: data.turns,
       toolExecs: data.toolExecs,
+      outcomes: data.outcomes,
       rate: deps.rate,
       baselineFn: deps.baselineFn,
       baselineEstimatedFn: deps.baselineEstimatedFn,

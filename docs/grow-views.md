@@ -33,6 +33,11 @@ Table: Daily, Pipeline health (`/api/v1/bi/health`).
 | Response time, typical | Daily `avg_latency_ms`, weighted by `latency_sample_n` | above 4000 |
 | Response time, worst 5% | Daily `p95_latency_ms` (show max, never average) | above 8000 |
 | Pipeline status | Health `status`, `pipeline_ok`, `aggregation_ok`, `last_event_at` | anything but `ok` |
+| Retrieval misses | Daily `outcome_retrieval_miss` / `outcome_sample_n` | above 0.10 — the RAG could not find the passage |
+| Not covered | Daily `outcome_not_covered` / `outcome_sample_n` | rising = a document is missing |
+| Tool failures | Daily `outcome_tool_failed`, `tool_errors` | any |
+| Token spend | Daily `total_tokens` | watch after each `build_sha` change |
+| Release marker | Daily `build_sha` | annotate charts where it changes |
 
 Compute rates from the counts on the same row. Do not average `success_rate` across days.
 
