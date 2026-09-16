@@ -4,6 +4,7 @@
 
 import { TOOL_CATALOG } from "../toolCatalog";
 import { knownToolNames } from "../baselines";
+import { CANARY_TENANT } from "../canary/canary";
 import type { MetricsStore, EventsStore } from "./store";
 import {
   type BiTable,
@@ -137,8 +138,10 @@ export async function health(ctx: BiContext, _q: URLSearchParams): Promise<Envel
     currency: ctx.currency ?? "GBP",
     api_version: API_VERSION,
     checked_at: ctx.now.toISOString(),
+    // The nightly canary lands only in the queue-probe tenant; elsewhere this is null.
+    canary_last_at: ctx.tenantId === CANARY_TENANT ? p.last_turn_at : null,
   };
-  return { data: [row], next: null, meta: baseMeta(ctx, "health", p, { count: 1 }) };
+  return { data: [row], next: null, meta: baseMeta(ctx, "health", p, { count: 1, canary_last_at: row.canary_last_at }) };
 }
 
 export async function daily(ctx: BiContext, q: URLSearchParams): Promise<Envelope> {

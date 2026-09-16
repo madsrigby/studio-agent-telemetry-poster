@@ -5,6 +5,8 @@ import './functions/Analyticsfunction';
 import './functions/postTelemetryToRelevance';
 import './functions/biApi';
 import './functions/adminAggregate';
+import './functions/canaryProbe';
+import './functions/retentionSweep';
 
 app.setup({
     enableHttpStream: true,

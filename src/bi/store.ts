@@ -5,6 +5,7 @@ import { TableClient } from "@azure/data-tables";
 import { odataString } from "./query";
 import { invertedTs, safeJsonParse } from "./util";
 import type { RawEventRow } from "../aggregation/aggregateDay";
+import type { RetentionStore } from "../retention/retention";
 
 export interface MetricsStore {
   /** telemetrymetrics rows for one tenant with rowKey in [fromKey, toKey]. */
@@ -62,6 +63,29 @@ export function tableMetricsStore(client: TableClient): MetricsStore {
     },
     async upsert(entity) {
       await client.upsertEntity(entity as any, "Replace");
+    },
+  };
+}
+
+/** Retention needs three primitives; kept separate so the BI stores stay read-only. */
+export function tableRetentionStore(client: TableClient): RetentionStore {
+  return {
+    listOlderThan(rowKeyGt) {
+      const it = client.listEntities({
+        queryOptions: { filter: `RowKey gt '${odataString(rowKeyGt)}'`, select: ["PartitionKey", "RowKey"] },
+      });
+      return (async function* () {
+        for await (const e of it) yield { partitionKey: String(e.partitionKey), rowKey: String(e.rowKey) };
+      })();
+    },
+    async countRows() {
+      let n = 0;
+      const it = client.listEntities({ queryOptions: { select: ["PartitionKey"] } });
+      for await (const _ of it) n++;
+      return n;
+    },
+    async deleteRow(ref) {
+      await client.deleteEntity(ref.partitionKey, ref.rowKey);
     },
   };
 }

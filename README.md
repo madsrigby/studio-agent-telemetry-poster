@@ -16,6 +16,12 @@ digest. Deploy: `func azure functionapp publish studioagent-telemetry-poster`.
   failures stored on the row (`sendError`) and retried the following week.
 - `dashboardApi` — HTTP: summary (incl. `sync_health`), trends, tools,
   events, hourly, users, demand, gaps.
+- `biApi` — HTTP `GET /api/v1/bi/{table}`: key-authenticated flat tables for BI tools (see below).
+- `adminAggregate` — HTTP `POST /api/ops/aggregate?from&to` (host key): backfill daily aggregates.
+- `canaryProbe` — timer, 01:00 UTC: enqueues one synthetic turn for tenant `queue-probe` so the
+  probe key's `health` row proves queue → trigger → table every day (`canary_last_at`).
+- `retentionSweep` — timer, Sundays 03:00 UTC: deletes `telemetryevents` rows older than
+  `RETENTION_MONTHS` (13). **Dry-run by default**; aborts a real run above `RETENTION_MAX_FRACTION`.
 
 ## Digest configuration (Function App settings)
 
@@ -99,6 +105,9 @@ Paging: `limit` 1–1000 (default 500); follow `next` until it is `null`
 | `BI_SENSITIVE_FLOOR` | suppression floor for sensitive topics (default 5) |
 | `DEFAULT_HOURLY_RATE` | £/hour for cost figures (default 45) |
 | `HANDBOOK_BASELINE_MINUTES_JSON` | per-tool baseline override, no redeploy |
+| `RETENTION_DRY_RUN` | `false` to actually delete; anything else = count only (default) |
+| `RETENTION_MONTHS` | raw-event retention in months (default 13) |
+| `RETENTION_MAX_FRACTION` | abort a real sweep that would delete more than this share of rows (default 0.10) |
 
 Mint a key (never paste the key into chat, email or a ticket):
 
@@ -121,6 +130,15 @@ quiet day is distinguishable from a missed run. Longer gaps:
 HOSTKEY=$(az functionapp keys list -g rg-StudioAgent16fddc-dev -n studioagent-telemetry-poster --query functionKeys.default -o tsv)
 curl -sS -X POST "$BASE/api/ops/aggregate?from=2026-06-01&to=2026-08-31&code=$HOSTKEY"   # ≤ 92 days per call
 ```
+
+Trigger either timer by hand (master key from `az functionapp keys list --query masterKey`):
+
+```
+curl -X POST "$BASE/admin/functions/canaryProbe"    -H "x-functions-key: $MASTER" -H "content-type: application/json" -d '{}'
+curl -X POST "$BASE/admin/functions/retentionSweep" -H "x-functions-key: $MASTER" -H "content-type: application/json" -d '{}'
+```
+
+Grow dashboard definitions: `docs/grow-views.md`.
 
 ### Runbook: "the BI tool shows zeros"
 
